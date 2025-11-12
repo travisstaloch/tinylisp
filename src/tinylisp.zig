@@ -1,7 +1,7 @@
 const std = @import("std");
 const debug = std.debug;
 const assert = debug.assert;
-const io = std.io;
+const Io = std.Io;
 
 const Tokenizer = @import("tokenizer.zig").Tokenizer;
 const Token = @import("tokenizer.zig").Token;
@@ -21,7 +21,7 @@ const CONS: I = 0x77FA;
 const CLOS: I = 0x77FB;
 const NIL: I = 0x7FFC;
 
-inline fn unbox(x: Expr) I {
+fn unbox(x: Expr) I {
     return @bitCast(x);
 }
 
@@ -57,35 +57,35 @@ fn not(x: Expr) bool {
 
 // Lisp ------------------------------------------------------------------------
 
-var nil: Expr = box(NIL, 0);
+const nil = box(NIL, 0);
 
 pub const Lisp = struct {
-    writer: io.AnyWriter = undefined,
-
+    writer: *Io.Writer,
     /// cell[N] array of Lisp expressions, shared by the stack and atom heap
-    stack: [N]Expr = [_]Expr{0} ** N,
-
-    /// address of the atom heap is at the bottom of the cell stack
-    heap: []u8 = undefined,
-
+    stack: *[N]Expr,
     /// heap pointer, heap+hp with hp=0 points to the first atom string in stack[]
-    heap_ptr: usize = 0,
+    heap_ptr: u32,
     /// stack pointer, the stack starts at the top of stack[] with sp=N
-    stack_ptr: usize = N,
-
-    err: Expr = undefined,
-    tru: Expr = undefined,
-    env: Expr = undefined,
+    stack_ptr: u32,
+    err: Expr,
+    tru: Expr,
+    env: Expr,
 
     // TODO: make this configurable via build.zig
     /// number of cells for the shared stack and atom heap, increase N as desired
-    const N = 1024;
+    pub const N: I = 1024;
 
-    pub fn init(l: *Lisp, writer: anytype) void {
-        l.writer = writer;
-
-        //l.heap = @as([*]u8, @ptrCast(@alignCast(l.stack[0..])))[0 .. l.stack.len * @sizeOf(Expr)];
-        l.heap = std.mem.sliceAsBytes(l.stack[0..]);
+    pub fn initPinned(l: *Lisp, writer: *Io.Writer, stack: *[N]Expr) void {
+        @memset(stack, 0);
+        l.* = .{
+            .writer = writer,
+            .stack = stack,
+            .heap_ptr = 0,
+            .stack_ptr = N,
+            .err = undefined,
+            .tru = undefined,
+            .env = undefined,
+        };
 
         l.err = l.atom("ERR");
         l.tru = l.atom("#t");
@@ -98,9 +98,10 @@ pub const Lisp = struct {
 
     // Errors --------------------------------------------------------------
 
-    pub const Error = error{
-        ParseError,
-    } || io.AnyReader.Error || io.AnyWriter.Error;
+    pub const Error =
+        error{ParseError} ||
+        Io.Reader.Error ||
+        Io.Writer.Error;
 
     fn checkStack(l: Lisp) void {
         if (l.heap_ptr > (l.stack_ptr * @sizeOf(Expr))) {
@@ -117,24 +118,28 @@ pub const Lisp = struct {
         return primitive_funs[@intCast(x)];
     }
 
+    fn heap(l: *Lisp) [*:0]u8 {
+        return @ptrCast(l.stack);
+    }
+
     // Core ----------------------------------------------------------------
 
     /// interning of atom names (Lisp symbols), returns a unique NaN-boxed ATOM
     fn atom(l: *Lisp, str: []const u8) Expr {
         var i: usize = 0;
         while (i < l.heap_ptr) {
-            if (std.mem.eql(u8, l.heap[i .. i + str.len], str)) {
+            if (std.mem.eql(u8, l.heap()[i .. i + str.len], str)) {
                 return box(ATOM, @intCast(i));
             } else {
-                i += strlen(l.heap[i..]) + 1;
+                i += std.mem.len(l.heap()[i..]) + 1;
             }
         }
 
         if (i == l.heap_ptr) {
-            @memcpy(l.heap[l.heap_ptr .. l.heap_ptr + str.len], str);
-            l.heap[l.heap_ptr + str.len] = 0;
+            @memcpy(l.heap()[l.heap_ptr .. l.heap_ptr + str.len], str);
+            l.heap()[l.heap_ptr + str.len] = 0;
 
-            l.heap_ptr += str.len + 1;
+            l.heap_ptr += @intCast(str.len + 1);
             l.checkStack();
         }
 
@@ -143,8 +148,7 @@ pub const Lisp = struct {
 
     fn atomName(l: *Lisp, x: Expr) []const u8 {
         assert(tag(x) == ATOM);
-        const i: usize = @intCast(ord(x));
-        return std.mem.sliceTo(l.heap[i..], 0);
+        return std.mem.sliceTo(l.heap()[@intCast(ord(x))..], 0);
     }
 
     /// construct pair (x . y) returns a NaN-boxed CONS
@@ -428,20 +432,13 @@ pub const Lisp = struct {
 
     fn f_echo(l: *Lisp, t: Expr, env: Expr) Expr {
         const t1 = l.car(l.evlis(t, env));
-        l.writer.print("    >> ", .{}) catch unreachable;
-        l.printExpr(t1) catch unreachable;
-        l.writer.print("\n", .{}) catch unreachable;
+        l.writer.print("    >> {f}\n", .{l.fmtExpr(t1)}) catch unreachable;
         return l.eval(t1, env);
     }
 
     fn f_echo_eval(l: *Lisp, t: Expr, env: Expr) Expr {
-        l.writer.print("    >> ", .{}) catch unreachable;
-        l.printExpr(t) catch unreachable;
-        l.writer.print("\n", .{}) catch unreachable;
-        l.writer.print("    << ", .{}) catch unreachable;
         const t1 = l.car(l.evlis(t, env));
-        l.printExpr(t1) catch unreachable;
-        l.writer.print("\n", .{}) catch unreachable;
+        l.writer.print("    >> {f}\n    << {f}\n", .{ l.fmtExpr(t), l.fmtExpr(t1) }) catch unreachable;
         return t1;
     }
 
@@ -545,65 +542,49 @@ pub const Lisp = struct {
     // GC ------------------------------------------------------------------
 
     fn garbageCollect(l: *Lisp) void {
-        l.stack_ptr = ord(l.env);
+        l.stack_ptr = @intCast(ord(l.env));
     }
 
     // Printer -------------------------------------------------------------
 
-    fn printNIL(l: *Lisp, x: Expr) !void {
-        assert(tag(x) == NIL);
-        try l.writer.print("()", .{});
-    }
-
-    fn printATOM(l: *Lisp, x: Expr) !void {
-        assert(tag(x) == ATOM);
-        try l.writer.print("{s}", .{l.atomName(x)});
-    }
-
-    fn printPRIM(l: *Lisp, x: Expr) !void {
-        assert(tag(x) == PRIM);
-        try l.writer.print("«{s}»", .{primitive_fun(ord(x)).sym});
-    }
-
-    fn printCONS(l: *Lisp, x: Expr) !void {
+    fn printCONS(l: *Lisp, x: Expr) Io.Writer.Error!void {
         assert(tag(x) == CONS);
         var t = x;
-        try l.writer.print("(", .{});
+        try l.writer.writeAll("(");
         while (true) {
-            try l.printExpr(l.car(t));
+            try l.writer.print("{f}", .{l.fmtExpr(l.car(t))});
             t = l.cdr(t);
             switch (tag(t)) {
                 NIL => break,
                 CONS => {},
                 else => {
-                    try l.writer.print(" . ", .{});
-                    try l.printExpr(t);
+                    try l.writer.print(" . {f}", .{l.fmtExpr(t)});
                     break;
                 },
             }
-            try l.writer.print(" ", .{});
+            try l.writer.writeAll(" ");
         }
-        try l.writer.print(")", .{});
+        try l.writer.writeAll(")");
     }
 
-    fn printCLOS(l: *Lisp, x: Expr) !void {
-        assert(tag(x) == CLOS);
-        try l.writer.print("«{d}»", .{ord(x)});
-    }
+    const FmtExpr = struct {
+        l: *Lisp,
+        x: Expr,
 
-    fn printNUM(l: *Lisp, x: Expr) !void {
-        try l.writer.print("{d}", .{x});
-    }
-
-    fn printExpr(l: *Lisp, x: Expr) anyerror!void {
-        switch (tag(x)) {
-            NIL => try l.printNIL(x),
-            ATOM => try l.printATOM(x),
-            PRIM => try l.printPRIM(x),
-            CONS => try l.printCONS(x),
-            CLOS => try l.printCLOS(x),
-            else => try l.printNUM(x),
+        pub fn format(f: FmtExpr, w: *Io.Writer) Io.Writer.Error!void {
+            switch (tag(f.x)) {
+                NIL => try w.writeAll("()"),
+                ATOM => try w.writeAll(f.l.atomName(f.x)),
+                PRIM => try w.print("«{s}»", .{primitive_fun(ord(f.x)).sym}),
+                CONS => try f.l.printCONS(f.x),
+                CLOS => try w.print("«{d}»", .{ord(f.x)}),
+                else => try w.print("{d}", .{f.x}),
+            }
         }
+    };
+
+    pub fn fmtExpr(l: *Lisp, x: Expr) FmtExpr {
+        return .{ .l = l, .x = x };
     }
 
     // Debugger ------------------------------------------------------------
@@ -612,22 +593,27 @@ pub const Lisp = struct {
         // TODO: use this value to generate the main fmt string used in this function
         const max_symbol_len = 20;
 
-        try l.writer.print("------------------- HEAP -------------------\n", .{});
-        try l.writer.print("|  #  |  address |  symbol                 |\n", .{});
-        try l.writer.print("|-----|----------|-------------------------|\n", .{});
+        try l.writer.writeAll(
+            \\------------------- HEAP -------------------
+            \\|  #  |  address |  symbol                 |
+            \\|-----|----------|-------------------------|
+            \\
+        );
 
         var atom_count: usize = 0;
         var last_i: usize = 0;
 
         var trimmed_i: usize = undefined;
         var symbol_suffix: *const [3:0]u8 = undefined;
-
-        for (l.heap, 0..) |byte, i| {
+        for (l.heap()[0..l.heap_ptr], 0..) |byte, i| {
             if (byte != 0) continue;
 
             if (i == l.heap_ptr) {
-                try l.writer.print("|                    ...                   |\n", .{});
-                try l.writer.print("--------------------------------------------\n", .{});
+                try l.writer.writeAll(
+                    \\|                    ...                   |
+                    \\--------------------------------------------
+                    \\
+                );
                 break;
             }
 
@@ -641,7 +627,7 @@ pub const Lisp = struct {
             try l.writer.print("| {:>3} |  0x{X:0>4}  |  {s:<20}{s}|\n", .{
                 atom_count,
                 last_i,
-                l.heap[last_i..trimmed_i :0],
+                l.heap()[last_i..trimmed_i :0],
                 symbol_suffix,
             });
 
@@ -651,9 +637,12 @@ pub const Lisp = struct {
     }
 
     fn printStack(l: *Lisp) !void {
-        try l.writer.print("------------- STACK ------------\n", .{});
-        try l.writer.print("|  pointer |   tag  |  ordinal |     Expr     \n", .{});
-        try l.writer.print("|----------|--------|----------|--------------\n", .{});
+        try l.writer.writeAll(
+            \\------------- STACK ------------
+            \\|  pointer |   tag  |  ordinal |     Expr     
+            \\|----------|--------|----------|--------------
+            \\
+        );
 
         var counter: usize = 0;
         var sp: usize = N;
@@ -670,28 +659,26 @@ pub const Lisp = struct {
                 else => try l.writer.print("        |          |  {d:<.10}\n", .{x}),
             }
         }
-        try l.writer.print("|             ...              |\n", .{});
-        try l.writer.print("|------------------------------|\n", .{});
+        try l.writer.writeAll(
+            \\|             ...              |
+            \\|------------------------------|
+            \\
+        );
     }
 
     fn printEnv(l: *Lisp, eIn: Expr) !void {
         var e = eIn;
-        try l.writer.print("(\n", .{});
+        try l.writer.writeAll("(\n");
         while (!not(e)) {
             const p = l.car(e);
-            try l.writer.print("\t", .{});
-            try l.printExpr(p);
-            try l.writer.print("\n", .{});
+            try l.writer.print("\t{f}\n", .{l.fmtExpr(p)});
             e = l.cdr(e);
         }
-        try l.writer.print(")\n", .{});
+        try l.writer.writeAll(")\n");
     }
 
-    pub fn printReplOutput(l: *Lisp, comptime out: []const u8, expr: Expr) !void {
-        try l.writer.print(out, .{});
-        // TODO: Implement Expr formatter
-        try l.printExpr(expr);
-        try l.writer.print("\n\n", .{});
+    pub fn printReplOutput(l: *Lisp, expr: Expr) !void {
+        try l.writer.print("{f}\n\n", .{l.fmtExpr(expr)});
     }
 
     // REPL ------------------------------------------------------------------------
@@ -703,33 +690,26 @@ pub const Lisp = struct {
         return l.eval(parsed_expr, l.env);
     }
 
-    pub fn repl(l: *Lisp, reader: io.AnyReader) !void {
-        const max_buffer_size = 1024; // TODO: use build options
+    pub fn repl(l: *Lisp, input: std.fs.File) !void {
         while (true) {
             defer l.garbageCollect();
             try l.writer.print("λ ", .{});
+
             // Read input
-            var buffer = try std.BoundedArray(u8, max_buffer_size).init(0);
-            try reader.streamUntilDelimiter(buffer.writer(), '\n', max_buffer_size);
-            try buffer.append(0);
-            const line = buffer.slice();
+            var buf: [4096]u8 = undefined;
+            const amt = try input.read(&buf);
+            buf[amt] = 0;
+            const line = buf[0..amt :0];
+
             // Tokenize, parse and evaluate code
-            const eval_expr = l.run(line[0 .. line.len - 1 :0]) orelse l.err;
+            const eval_expr = l.run(line) orelse l.err;
             // Print result
-            try l.printReplOutput("", eval_expr);
+            try l.printReplOutput(eval_expr);
         }
     }
 };
 
 // Utilities -------------------------------------------------------------------
-
-fn strlen(ptr: []u8) usize {
-    var i: usize = 0;
-    while (ptr[i] != 0) {
-        i += 1;
-    }
-    return i;
-}
 
 test "tinylisp - atoms" {
     try testExprTag("#t", ATOM);
@@ -747,10 +727,14 @@ test "tinylisp - cons" {
 }
 
 fn testExprTag(source: [:0]const u8, expected_expr_tag: I) !void {
-    const writer = std.io.getStdOut().writer().any();
-
-    var lisp = Lisp{};
-    lisp.init(writer);
+    var stdout_w = std.fs.File.stdout().writer(&.{}); // TODO use discarding writer?
+    var lisp: Lisp = undefined;
+    var stack: [Lisp.N]Expr = undefined;
+    lisp.initPinned(&stdout_w.interface, &stack);
     const eval_expr = lisp.run(source) orelse lisp.err;
     try std.testing.expectEqual(tag(eval_expr), expected_expr_tag);
+}
+
+test {
+    _ = @import("tokenizer.zig");
 }

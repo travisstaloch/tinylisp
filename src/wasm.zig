@@ -15,16 +15,17 @@ export fn _wasm_free(ptr: [*]u8, len: usize) void {
     std.heap.wasm_allocator.free(ptr[0..len]);
 }
 
-var lisp = tinylisp.Lisp{};
+var lisp: tinylisp.Lisp = undefined;
+var stack: [tinylisp.Lisp.N]f64 = undefined;
+var writer = JS.Terminal.writer();
 
 export fn tinylisp_init() bool {
-    const writer = JS.Terminal.writer().any();
-    lisp.init(writer);
+    lisp.initPinned(&writer, &stack);
     return true;
 }
 
 export fn tinylisp_run(code_ptr: [*]u8, code_len: u32) void {
     const code = code_ptr[0..code_len :0];
     const eval_expr = lisp.run(code) orelse lisp.err;
-    lisp.printReplOutput("", eval_expr) catch unreachable;
+    lisp.printReplOutput(eval_expr) catch unreachable;
 }

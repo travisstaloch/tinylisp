@@ -3,10 +3,10 @@ const std = @import("std");
 const tinylisp = @import("tinylisp.zig");
 
 pub fn main() anyerror!void {
-    const reader = std.io.getStdIn().reader().any();
-    const writer = std.io.getStdOut().writer().any();
+    var writer = std.fs.File.stdout().writer(&.{});
 
-    var lisp = tinylisp.Lisp{};
-    lisp.init(writer);
-    try lisp.repl(reader);
+    var lisp: tinylisp.Lisp = undefined;
+    var stack: [tinylisp.Lisp.N]f64 = undefined;
+    lisp.initPinned(&writer.interface, &stack);
+    try lisp.repl(std.fs.File.stdin());
 }

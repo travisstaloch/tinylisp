@@ -1,4 +1,5 @@
 const std = @import("std");
+const Io = std.Io;
 
 pub const Imports = struct {
     extern fn jsTerminalWriteBuffer(ptr: [*]const u8, len: usize) void;
@@ -8,20 +9,17 @@ pub const Imports = struct {
 };
 
 pub const Terminal = struct {
-    pub const Error = error{};
-    pub const Writer = std.io.GenericWriter(
-        void,
-        Error,
-        writeFn,
-    );
-
-    pub fn writer() Writer {
-        return Terminal.Writer{ .context = {} };
+    pub fn writer() Io.Writer {
+        return .{
+            .buffer = &.{},
+            .end = 0,
+            .vtable = &.{ .drain = writeFn },
+        };
     }
 
-    fn writeFn(_: void, bytes: []const u8) Error!usize {
-        Imports.jsTerminalWriteBuffer(bytes.ptr, bytes.len);
-        return bytes.len;
+    fn writeFn(_: *Io.Writer, bytes: []const []const u8, _: usize) Io.Writer.Error!usize {
+        Imports.jsTerminalWriteBuffer(bytes[0].ptr, bytes[0].len);
+        return bytes[0].len;
     }
 };
 
