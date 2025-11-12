@@ -61,27 +61,26 @@ const nil = box(NIL, 0);
 
 pub const Lisp = struct {
     writer: *Io.Writer,
-    /// cell[N] array of Lisp expressions, shared by the stack and atom heap
-    stack: *[N]Expr,
+    /// array of Lisp expressions, shared by the stack and atom heap. suggested
+    /// length 1024 or more.
+    stack: []Expr,
     /// heap pointer, heap+hp with hp=0 points to the first atom string in stack[]
     heap_ptr: u32,
-    /// stack pointer, the stack starts at the top of stack[] with sp=N
+    /// stack pointer, the stack starts at the top of stack[] with sp=stack.len
     stack_ptr: u32,
     err: Expr,
     tru: Expr,
     env: Expr,
 
-    // TODO: make this configurable via build.zig
-    /// number of cells for the shared stack and atom heap, increase N as desired
-    pub const N: I = 1024;
-
-    pub fn initPinned(l: *Lisp, writer: *Io.Writer, stack: *[N]Expr) void {
+    /// `stack`: cells for the shared stack and atom heap. suggested stack
+    /// length: 1024 or more.
+    pub fn initPinned(l: *Lisp, writer: *Io.Writer, stack: []Expr) void {
         @memset(stack, 0);
         l.* = .{
             .writer = writer,
             .stack = stack,
             .heap_ptr = 0,
-            .stack_ptr = N,
+            .stack_ptr = @intCast(stack.len),
             .err = undefined,
             .tru = undefined,
             .env = undefined,
@@ -645,9 +644,9 @@ pub const Lisp = struct {
         );
 
         var counter: usize = 0;
-        var sp: usize = N;
+        var sp: usize = l.stack.len;
         while (sp > l.stack_ptr) : (counter += 1) {
-            try l.writer.print("|   {:>5}  |", .{N - counter});
+            try l.writer.print("|   {:>5}  |", .{l.stack.len - counter});
             sp -= 1;
             const x = l.stack[sp];
             switch (tag(x)) {
@@ -729,7 +728,7 @@ test "tinylisp - cons" {
 fn testExprTag(source: [:0]const u8, expected_expr_tag: I) !void {
     var stdout_w = std.fs.File.stdout().writer(&.{}); // TODO use discarding writer?
     var lisp: Lisp = undefined;
-    var stack: [Lisp.N]Expr = undefined;
+    var stack: [1024]Expr = undefined;
     lisp.initPinned(&stdout_w.interface, &stack);
     const eval_expr = lisp.run(source) orelse lisp.err;
     try std.testing.expectEqual(tag(eval_expr), expected_expr_tag);

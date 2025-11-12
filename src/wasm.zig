@@ -16,7 +16,7 @@ export fn _wasm_free(ptr: [*]u8, len: usize) void {
 }
 
 var lisp: tinylisp.Lisp = undefined;
-var stack: [tinylisp.Lisp.N]f64 = undefined;
+var stack: [1024]f64 = undefined;
 var writer = JS.Terminal.writer();
 
 export fn tinylisp_init() bool {
